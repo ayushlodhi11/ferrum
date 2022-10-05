@@ -19,7 +19,7 @@ module Ferrum
 
       attr_reader :host, :port, :ws_url, :pid, :command,
                   :default_user_agent, :browser_version, :protocol_version,
-                  :v8_version, :webkit_version, :xvfb
+                  :v8_version, :webkit_version, :xvfb, :browserless_tag, :url
 
       extend Forwardable
       delegate path: :command
@@ -62,11 +62,12 @@ module Ferrum
 
       def initialize(options)
         @pid = @xvfb = @user_data_dir = nil
-
+        @browserless_tag = options[:browserless_tag]
+        @url = options[:url]
         if options[:url]
           url = URI.join(options[:url].to_s, "/json/version")
           response = JSON.parse(::Net::HTTP.get(url))
-          self.ws_url = response["webSocketDebuggerUrl"]
+          self.ws_url = ws_url_with_tracking_id(response["webSocketDebuggerUrl"])
           parse_browser_versions
           return
         end
@@ -108,6 +109,16 @@ module Ferrum
       end
 
       def stop
+        if @browserless_tag.to_s.length.positive?
+          begin
+            JSON.parse(::Net::HTTP.get(URI.join(@url, "/sessions")))
+                .select { |session| session["trackingId"] == @browserless_tag }
+                .each { |session| ::Net::HTTP.get(URI.join(@url, "/kill/#{session['id']}")) }
+          rescue StandardError => e
+            @logger&.puts("Error in stopping browser: #{e}")
+          end
+        end
+
         if @pid
           kill(@pid)
           kill(@xvfb.pid) if @xvfb&.pid
@@ -124,6 +135,12 @@ module Ferrum
       end
 
       private
+
+      def ws_url_with_tracking_id(url)
+        return URI.join(url.to_s, "?trackingId=#{@browserless_tag}") unless @browserless_tag.nil?
+
+        url
+      end
 
       def kill(pid)
         self.class.process_killer(pid).call
@@ -146,7 +163,7 @@ module Ferrum
             read_io.wait_readable(max_time - now)
           else
             if output.match(regexp)
-              self.ws_url = output.match(regexp)[1].strip
+              self.ws_url = ws_url_with_tracking_id(output.match(regexp)[1].strip)
               break
             end
           end
